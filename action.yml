@@ -57,18 +57,17 @@ runs:
         run: |
           echo "::error title=⛔ error hint::Support Linux Only"
           exit 1
+
       - name: Check Auth Info Empty
         if: ${{ inputs.authkey == '' && (inputs['oauth-secret'] == '' || inputs.tags == '') }}
         shell: bash
         run: |
           echo "::error title=⛔ error hint::OAuth identity empty, Maybe you need to populate it in the Secrets for your workflow, see more in https://docs.github.com/en/actions/security-guides/encrypted-secrets and https://tailscale.com/s/oauth-clients"
           exit 1
-      - name: Download Tailscale
+
+      - name: Set up cache variables
         shell: bash
-        id: download
-        env:
-          VERSION: ${{ inputs.version }}
-          SHA256SUM: ${{ inputs.sha256sum }}
+        id: cache-vars
         run: |
           if [ ${{ runner.arch }} = "ARM64" ]; then
             TS_ARCH="arm64"
@@ -81,6 +80,25 @@ runs:
           else
             TS_ARCH="amd64"
           fi
+          echo "ts_arch=${TS_ARCH}" >> $GITHUB_OUTPUT
+          echo "cache_key=tailscale-${{ inputs.version }}-${TS_ARCH}" >> $GITHUB_OUTPUT
+
+      - name: Cache Tailscale Binary
+        id: cache-tailscale
+        uses: actions/cache@v3
+        with:
+          path: /tmp/tailscale-cache
+          key: ${{ steps.cache-vars.outputs.cache_key }}
+
+      - name: Download Tailscale
+        if: steps.cache-tailscale.outputs.cache-hit != 'true'
+        shell: bash
+        id: download
+        env:
+          VERSION: ${{ inputs.version }}
+          SHA256SUM: ${{ inputs.sha256sum }}
+          TS_ARCH: ${{ steps.cache-vars.outputs.ts_arch }}
+        run: |
           MINOR=$(echo "$VERSION" | awk -F '.' {'print $2'})
           if [ $((MINOR % 2)) -eq 0 ]; then
             URL="https://pkgs.tailscale.com/stable/tailscale_${VERSION}_${TS_ARCH}.tgz"
@@ -95,10 +113,19 @@ runs:
           echo "Expected sha256: $SHA256SUM"
           echo "Actual sha256: $(sha256sum tailscale.tgz)"
           echo "$SHA256SUM  tailscale.tgz" | sha256sum -c
-          tar -C /tmp -xzf tailscale.tgz
+          
+          mkdir -p /tmp/tailscale-cache
+          tar -C /tmp/tailscale-cache -xzf tailscale.tgz
           rm tailscale.tgz
-          TSPATH=/tmp/tailscale_${VERSION}_${TS_ARCH}
+
+      - name: Install Tailscale from cache
+        shell: bash
+        env:
+          TS_ARCH: ${{ steps.cache-vars.outputs.ts_arch }}
+        run: |
+          TSPATH="/tmp/tailscale-cache/tailscale_${{ inputs.version }}_${TS_ARCH}"
           sudo mv "${TSPATH}/tailscale" "${TSPATH}/tailscaled" /usr/bin
+
       - name: Start Tailscale Daemon
         shell: bash
         env:
@@ -116,6 +143,7 @@ runs:
           # for it. And --json will make it exit with status 0 even if we're logged
           # out (as we will be). Without --json it returns an error if we're not up.
           sudo -E tailscale status --json >/dev/null
+
       - name: Connect to Tailscale
         shell: bash
         env:
